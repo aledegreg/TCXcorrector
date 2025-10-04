@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TCX Corrector: Interruzione Allenamento</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f9;
+            color: #333;
+        }
+        .container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #0056b3;
+            text-align: center;
+        }
+        input[type="file"], input[type="text"], input[type="number"], button {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            box-sizing: border-box;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+        button {
+            background-color: #28a745;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #218838;
+        }
+        .info {
+            background-color: #e9ecef;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            border-left: 5px solid #007bff;
+        }
+        #status {
+            margin-top: 15px;
+            font-weight: bold;
+            color: #d9534f;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Correzione File TCX per Interruzione Traffico 🚦</h1>
+    
+    <div class="info">
+        <p>Il processo viene eseguito interamente nel browser. I dati del tuo file TCX non vengono mai inviati a un server.</p>
+        <p><strong>Formato ora di inizio:</strong> `HH:MM:SS` (se il file è di oggi) o il timestamp completo `YYYY-MM-DDTHH:MM:SSZ` (più preciso).</p>
+    </div>
+
+    <input type="file" id="tcxFile" accept=".tcx">
+
+    <label for="startTime">Timestamp di Inizio Interruzione (es. 09:18:20):</label>
+    <input type="text" id="startTime" placeholder="09:18:20 o 2025-10-04T09:18:20Z" value="">
+
+    <label for="durationSeconds">Durata Rallentamento (secondi, es. 180 per 3 minuti):</label>
+    <input type="number" id="durationSeconds" placeholder="180" value="180" min="10">
+
+    <button onclick="processFile()">Correggi e Scarica TCX</button>
+
+    <div id="status">In attesa del file...</div>
+</div>
+
+<script>
+// --- FUNZIONI DI UTILITÀ PER DATA/ORA ---
+
+/**
+ * Converte una stringa di timestamp TCX (es. '2025-10-04T09:18:20.000Z') in millisecondi.
+ * @param {string} timeString - La stringa di tempo da parsare.
+ * @returns {number} Millisecondi dall'epoca.
+ */
+function parseTCXTime(timeString) {
+    return new Date(timeString).getTime();
+}
+
+/**
+ * Converte millisecondi in una stringa di timestamp TCX.
+ * @param {number} milliseconds - Millisecondi dall'epoca.
+ * @returns {string} Timestamp TCX formattato.
+ */
+function formatTCXTime(milliseconds) {
+    const date = new Date(milliseconds);
+    // Assicura il formato ISO 8601 richiesto da TCX, inclusa la 'Z' finale.
+    // Usiamo una precisione fissa di 3 decimali per consistenza.
+    return date.toISOString(); 
+}
+
+// --- LOGICA PRINCIPALE DI CORREZIONE ---
+
+async function processFile() {
+    const fileInput = document.getElementById('tcxFile');
+    const startTimeInput = document.getElementById('startTime').value.trim();
+    const durationSec = parseInt(document.getElementById('durationSeconds').value, 10);
+    const statusDiv = document.getElementById('status');
+    statusDiv.style.color = 'red';
+    statusDiv.textContent = 'Elaborazione in corso...';
+
+    if (fileInput.files.length === 0 || !startTimeInput || !durationSec || durationSec <= 0) {
+        statusDiv.textContent = 'Errore: assicurati di aver caricato il file e inserito tutti i parametri validi.';
+        return;
+    }
+
+    const file = fileInput.files[0];
+    const reader = new FileReader();
+
+    reader.onload = function(e) {
+        try {
+            const xmlString = e.target.result;
+            const parser = new DOMParser();
+            let xmlDoc = parser.parseFromString(xmlString, "text/xml");
+
+            // Verifica errori di parsing
+            if (xmlDoc.getElementsByTagName('parsererror').length > 0) {
+                statusDiv.textContent = 'Errore: Impossibile parsare il file XML (TCX non valido).';
+                return;
+            }
+
+            const trackpoints = xmlDoc.querySelectorAll('Trackpoint');
+            if (trackpoints.length === 0) {
+                statusDiv.textContent = 'Errore: Nessun Trackpoint trovato nel file TCX.';
+                return;
+            }
+
+            // --- 1. Trova l'orario di inizio dell'attività per gestire l'input HH:MM:SS ---
+            const firstTrackTime = trackpoints[0].querySelector('Time').textContent;
+            let fullStartTime;
+
+            if (startTimeInput.includes('T') && startTimeInput.includes('Z')) {
+                // Input completo YYYY-MM-DDTHH:MM:SSZ
+                fullStartTime = parseTCXTime(startTimeInput);
+            } else {
+                // Input solo HH:MM:SS. Prende la data dal primo trackpoint
+                const datePart = firstTrackTime.substring(0, firstTrackTime.indexOf('T'));
+                try {
+                    fullStartTime = parseTCXTime(datePart + 'T' + startTimeInput + 'Z');
+                } catch(e) {
+                    statusDiv.textContent = 'Errore: Formato ora di inizio non valido. Usa HH:MM:SS o il formato completo.';
+                    return;
+                }
+            }
+            const fullEndTime = fullStartTime + (durationSec * 1000);
+            
+            // --- 2. Identifica i Trackpoint di Inizio e Fine Interruzione ---
+            let startIndex = -1;
+            let endIndex = -1;
+            let previousIndex = -1; // Indice del punto prima dell'interruzione
+            
+            for (let i = 0; i < trackpoints.length; i++) {
+                const currentTimeMs = parseTCXTime(trackpoints[i].querySelector('Time').textContent);
+
+                if (currentTimeMs < fullStartTime) {
+                    previousIndex = i;
+                } else if (startIndex === -1 && currentTimeMs >= fullStartTime) {
+                    startIndex = i;
+                }
+                
+                if (currentTimeMs >= fullEndTime) {
+                    endIndex = i;
+                    break;
+                }
+            }
+            
+            if (startIndex === -1 || previousIndex === -1) {
+                statusDiv.textContent = 'Errore: Impossibile trovare l\'intervallo di interruzione. Controlla l\'orario di inizio.';
+                return;
+            }
+            if (endIndex === -1) {
+                // L'interruzione dura fino alla fine del file, usiamo l'ultimo punto
+                endIndex = trackpoints.length - 1;
+            }
+
+            const startTrackpoint = trackpoints[startIndex];
+            const endTrackpoint = trackpoints[endIndex];
+            const prevTrackpoint = trackpoints[previousIndex];
+
+            // --- 3. Trova le Metriche Corrette (Prima dell'Interruzione) ---
+            const prevSpeedEl = prevTrackpoint.querySelector('Speed');
+            const prevHREl = prevTrackpoint.querySelector('HeartRateBpm Value');
+            const prevCadenceEl = prevTrackpoint.querySelector('RunCadence');
+
+            const V_correct = prevSpeedEl ? parseFloat(prevSpeedEl.textContent) : 2.75; // Default 6:04/km
+            const HR_correct = prevHREl ? parseInt(prevHREl.textContent, 10) : 150;
+            const Cadence_correct = prevCadenceEl ? parseInt(prevCadenceEl.textContent, 10) : 85;
+
+            // --- 4. Calcola lo Spostamento Temporale (Time Shift) ---
+            
+            // Distanza coperta durante l'interruzione (i TCX mantengono i dati di distanza progressivi)
+            const D_start = parseFloat(startTrackpoint.querySelector('DistanceMeters').textContent);
+            const D_end = parseFloat(endTrackpoint.querySelector('DistanceMeters').textContent);
+            const Delta_D_actual = D_end - D_start;
+
+            // Tempo ideale per coprire Delta_D_actual alla V_correct
+            const Delta_T_ideal_ms = (V_correct > 0) ? (Delta_D_actual / V_correct) * 1000 : durationSec * 1000;
+            
+            // Tempo effettivo registrato
+            const T_end_actual = parseTCXTime(endTrackpoint.querySelector('Time').textContent);
+            const T_start_actual = parseTCXTime(startTrackpoint.querySelector('Time').textContent);
+            const Delta_T_actual_ms = T_end_actual - T_start_actual;
+            
+            // Il delta (shift) da sottrarre a TUTTI i timestamp successivi (e nell'intervallo)
+            const Time_Shift_ms = Delta_T_actual_ms - Delta_T_ideal_ms;
+            
+            if (Time_Shift_ms < 0) {
+                statusDiv.textContent = 'Attenzione: Il tempo di rallentamento rimosso è negativo. Forse hai impostato un ritmo corretto troppo lento o l\'interruzione non era un rallentamento.';
+            }
+
+            // --- 5. Applicazione delle Correzioni sui Trackpoint ---
+            
+            for (let i = startIndex; i < trackpoints.length; i++) {
+                const tp = trackpoints[i];
+                let timeEl = tp.querySelector('Time');
+                let currentTimeMs = parseTCXTime(timeEl.textContent);
+
+                // A. CORREZIONE RITMO/HR (solo nell'intervallo)
+                if (i >= startIndex && i <= endIndex) {
+                    
+                    // 1) Ritmo e Cadenza
+                    let speedEl = tp.querySelector('Speed');
+                    if (speedEl) speedEl.textContent = V_correct.toFixed(6);
+
+                    let cadenceEl = tp.querySelector('RunCadence');
+                    if (cadenceEl) cadenceEl.textContent = Cadence_correct;
+                    
+                    // 2) Battito Cardiaco
+                    let hrEl = tp.querySelector('HeartRateBpm Value');
+                    if (hrEl) hrEl.textContent = HR_correct;
+
+                    // NOTA: La distanza non viene toccata in quanto i GPS mantengono la posizione corretta.
+                }
+
+                // B. CORREZIONE ORARIO (da startIndex fino alla fine)
+                currentTimeMs -= Time_Shift_ms;
+                timeEl.textContent = formatTCXTime(currentTimeMs);
+            }
+            
+            // --- 6. Aggiorna i riepiloghi (Lap e Totale Attività) ---
+            updateSummaryMetrics(xmlDoc, Time_Shift_ms / 1000);
+
+            // --- 7. Scarica il file corretto ---
+            downloadFile(new XMLSerializer().serializeToString(xmlDoc));
+
+            statusDiv.style.color = 'green';
+            statusDiv.textContent = `✅ Correzione completata con successo. Tempo rimosso dall'allenamento: ${(Time_Shift_ms / 1000).toFixed(2)} secondi. Il download è iniziato.`;
+
+        } catch (error) {
+            console.error(error);
+            statusDiv.textContent = `Errore critico durante l'elaborazione: ${error.message}`;
+        }
+    };
+
+    reader.readAsText(file);
+}
+
+/**
+ * Aggiorna i campi TotalTimeSeconds e i Lap.
+ * @param {Document} xmlDoc - L'oggetto DOM del TCX.
+ * @param {number} timeShiftSeconds - Il tempo (in secondi) da sottrarre.
+ */
+function updateSummaryMetrics(xmlDoc, timeShiftSeconds) {
+    const laps = xmlDoc.querySelectorAll('Lap');
+    
+    // Aggiorna TotalTimeSeconds per ogni Lap.
+    laps.forEach(lap => {
+        let totalTimeEl = lap.querySelector('TotalTimeSeconds');
+        if (totalTimeEl) {
+            let originalTime = parseFloat(totalTimeEl.textContent);
+            totalTimeEl.textContent = (originalTime - timeShiftSeconds).toFixed(3);
+        }
+        
+        // Aggiorna StartTime del Lap: se il Lap inizia dopo l'interruzione, il suo orario deve essere shiftato.
+        let startTimeEl = lap.getAttribute('StartTime');
+        if (startTimeEl) {
+            const lapStartTimeMs = parseTCXTime(startTimeEl);
+            // Assumiamo che la correzione inizi al Lap contenente il punto di inizio
+            // Qui assumiamo che Lap.StartTime non sia toccato per semplicità, 
+            // ma il Lap che include l'interruzione deve avere il suo tempo totale corretto.
+            // L'approccio di correggere TotalTimeSeconds è sufficiente, 
+            // dato che i trackpoint interni hanno già l'orario corretto.
+        }
+    });
+
+    // Aggiorna il riepilogo dell'attività, se presente
+    const activityExt = xmlDoc.querySelector('Activity Extension');
+    if (activityExt) {
+        let totalTimeEl = activityExt.querySelector('TotalTimeSeconds');
+        if (totalTimeEl) {
+            let originalTime = parseFloat(totalTimeEl.textContent);
+            totalTimeEl.textContent = (originalTime - timeShiftSeconds).toFixed(3);
+        }
+    }
+}
+
+/**
+ * Avvia il download del file TCX corretto.
+ * @param {string} tcxContent - Il contenuto XML del file TCX corretto.
+ */
+function downloadFile(tcxContent) {
+    const blob = new Blob([tcxContent], { type: 'application/tcx+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'corrected_run.tcx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+</script>
+
+</body>
+</html>
